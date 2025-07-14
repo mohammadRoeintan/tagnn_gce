@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-# main_final_with_resume.py
+# main_final.py
 
 # =====================================================================================
 # بخش ۱: وارد کردن کتابخانه‌ها و تنظیمات
@@ -13,17 +13,16 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import DataLoader, Dataset
 import numpy as np
-import pandas as pd
 from scipy.sparse import csr_matrix, coo_matrix
 from tqdm import tqdm
 
-parser = argparse.ArgumentParser(description="GCE-TAGNN v2 End-to-End Training with Resume Capability")
-parser.add_argument('--dataset', default='diginetica', help='نام پوشه دیتاست: diginetica یا yoochoose1_64.')
+# --- پارسرهای ورودی با قابلیت ادامه آموزش ---
+parser = argparse.ArgumentParser(description="GCE-TAGNN v2 - Final Version")
+parser.add_argument('--dataset', default='diginetica', help='نام پوشه دیتاست: diginetica یا yoochoose.')
 parser.add_argument('--batch_size', type=int, default=100, help='اندازه بچ.')
 parser.add_argument('--hidden_size', type=int, default=100, help='اندازه لایه‌های پنهان.')
 parser.add_argument('--epoch', type=int, default=30, help='تعداد کل اپک‌های آموزش.')
 parser.add_argument('--lr', type=float, default=0.001, help='نرخ یادگیری اولیه.')
-parser.add_argument('--lr_dc', type=float, default=0.1, help='ضریب کاهش نرخ یادگیری.')
 parser.add_argument('--lr_dc_step', type=int, default=3, help='گام کاهش نرخ یادگیری (بر حسب اپک).')
 parser.add_argument('--l2', type=float, default=1e-5, help='جریمه L2 (Weight Decay).')
 parser.add_argument('--gnn_step', type=int, default=1, help='تعداد گام‌های انتشار در GNN.')
@@ -41,55 +40,49 @@ print(f"Using device: {device}")
 # =====================================================================================
 # بخش ۲: توابع کمکی برای ساخت گراف و دیتاست
 # =====================================================================================
-def load_and_preprocess_data(dataset_name):
-    print(f"شروع بارگذاری و پیش‌پردازش دیتاست: {dataset_name}...")
-    processed_dir = 'processed_data'; os.makedirs(processed_dir, exist_ok=True)
-    paths = {'train': os.path.join(processed_dir, f'train_{dataset_name}.pkl'), 'test': os.path.join(processed_dir, f'test_{dataset_name}.pkl'), 'all_train_seq': os.path.join(processed_dir, f'all_train_seq_{dataset_name}.pkl'), 'item_map': os.path.join(processed_dir, f'item_map_{dataset_name}.pkl')}
-    if all([os.path.exists(p) for p in paths.values()]):
-        print("فایل‌های پردازش‌شده یافت شد. در حال بارگذاری از کش..."); train_data = pickle.load(open(paths['train'], 'rb')); test_data = pickle.load(open(paths['test'], 'rb')); all_train_seq = pickle.load(open(paths['all_train_seq'], 'rb')); item_map = pickle.load(open(paths['item_map'], 'rb')); num_items = len(item_map) + 1
-        return train_data, test_data, all_train_seq, num_items
-    print("فایل‌های پردازش‌شده یافت نشد. شروع پیش‌پردازش از ابتدا...")
-    if dataset_name == 'diginetica':
-        raw_path = os.path.join(dataset_name, 'train-item-views.csv'); raw_data = pd.read_csv(raw_path, sep=','); raw_data.columns = ['session_id', 'user_id', 'item_id', 'timeframe', 'eventdate']; raw_data['eventdate'] = pd.to_datetime(raw_data['eventdate'], unit='s'); raw_data = raw_data.sort_values(['session_id', 'eventdate']); split_date = raw_data['eventdate'].max() - pd.to_timedelta(7, 'd'); train_session_ids = raw_data[raw_data['eventdate'] < split_date]['session_id'].unique(); test_session_ids = raw_data[raw_data['eventdate'] >= split_date]['session_id'].unique()
-    elif dataset_name == 'yoochoose1_64':
-        raw_path = os.path.join(dataset_name, 'yoochoose-clicks.dat'); raw_data = pd.read_csv(raw_path, sep=',', header=None, usecols=[0, 1, 2], dtype={0: np.int32, 1: str, 2: np.int64}); raw_data.columns = ['session_id', 'timestamp', 'item_id']; raw_data['timestamp'] = pd.to_datetime(raw_data['timestamp']); raw_data = raw_data.sort_values(['session_id', 'timestamp']); split_date = raw_data['timestamp'].max() - pd.to_timedelta(1, 'd'); train_session_ids = raw_data[raw_data['timestamp'] < split_date]['session_id'].unique(); test_session_ids = raw_data[raw_data['timestamp'] >= split_date]['session_id'].unique()
-    else: raise ValueError("دیتاست نامعتبر است.")
-    session_lengths = raw_data.groupby('session_id').size(); raw_data = raw_data[np.in1d(raw_data.session_id, session_lengths[session_lengths > 1].index)]; item_counts = raw_data['item_id'].value_counts(); raw_data = raw_data[np.in1d(raw_data.item_id, item_counts[item_counts >= 5].index)]; session_lengths = raw_data.groupby('session_id').size(); raw_data = raw_data[np.in1d(raw_data.session_id, session_lengths[session_lengths > 1].index)]; item_ids = raw_data['item_id'].unique(); item_map = {item: i + 1 for i, item in enumerate(item_ids)}; raw_data['item_id'] = raw_data['item_id'].map(item_map); num_items = len(item_map) + 1; sessions = raw_data.groupby('session_id')['item_id'].apply(list); train_sessions = sessions[sessions.index.isin(train_session_ids)]; test_sessions = sessions[sessions.index.isin(test_session_ids)]
-    if dataset_name == 'yoochoose1_64':
-        print("کاهش مجموعه آموزش به جدیدترین 1/64 جلسات برای Yoochoose..."); train_session_times = raw_data[raw_data['session_id'].isin(train_sessions.index)].groupby('session_id')['timestamp'].max(); latest_session_ids = train_session_times.sort_values(ascending=False).index[:len(train_session_times) // 64]; train_sessions = train_sessions[train_sessions.index.isin(latest_session_ids)]
-    def process_sessions_to_sequences(session_data):
-        out_seqs, labs = [], [];
-        for session in tqdm(session_data, desc="Processing sessions into sequences"):
-            if len(session) > 1:
-                for i in range(1, len(session)): out_seqs.append(session[:i]); labs.append(session[i])
-        return out_seqs, labs
-    train_seq, train_lab = process_sessions_to_sequences(train_sessions); test_seq, test_lab = process_sessions_to_sequences(test_sessions); train_data = (train_seq, train_lab); test_data = (test_seq, test_lab); all_train_seq = train_sessions.tolist()
-    print("پیش‌پردازش تمام شد. در حال ذخیره فایل‌ها در کش...")
-    pickle.dump(train_data, open(paths['train'], 'wb')); pickle.dump(test_data, open(paths['test'], 'wb')); pickle.dump(all_train_seq, open(paths['all_train_seq'], 'wb')); pickle.dump(item_map, open(paths['item_map'], 'wb'))
-    return train_data, test_data, all_train_seq, num_items
 
 def build_global_graph(all_train_seq, num_items):
     print("شروع ساخت گراف سراسری...")
-    rows, cols = [], [];
+    rows, cols = [], []
     for session in tqdm(all_train_seq, desc="Building global graph edges"):
-        for i in range(len(session) - 1): rows.append(session[i]); cols.append(session[i+1]); rows.append(session[i+1]); cols.append(session[i])
-    data = np.ones(len(rows)); adj = csr_matrix((data, (rows, cols)), shape=(num_items, num_items)); rowsum = np.array(adj.sum(axis=1)).flatten(); d_inv_sqrt = np.power(rowsum, -0.5); d_inv_sqrt[np.isinf(d_inv_sqrt)] = 0.
-    d_mat_inv_sqrt = csr_matrix(np.diag(d_inv_sqrt)); adj_norm = adj.dot(d_mat_inv_sqrt).transpose().dot(d_mat_inv_sqrt).tocoo(); indices = torch.from_numpy(np.vstack((adj_norm.row, adj_norm.col)).astype(np.int64)); values = torch.from_numpy(adj_norm.data.astype(np.float32)); shape = torch.Size(adj_norm.shape)
+        for i in range(len(session) - 1):
+            rows.append(session[i])
+            cols.append(session[i+1])
+            rows.append(session[i+1])
+            cols.append(session[i])
+    data = np.ones(len(rows))
+    adj = csr_matrix((data, (rows, cols)), shape=(num_items, num_items))
+    rowsum = np.array(adj.sum(axis=1)).flatten()
+    d_inv_sqrt = np.power(rowsum, -0.5)
+    d_inv_sqrt[np.isinf(d_inv_sqrt)] = 0.
+    d_mat_inv_sqrt = csr_matrix(np.diag(d_inv_sqrt))
+    adj_norm = adj.dot(d_mat_inv_sqrt).transpose().dot(d_mat_inv_sqrt).tocoo()
+    indices = torch.from_numpy(np.vstack((adj_norm.row, adj_norm.col)).astype(np.int64))
+    values = torch.from_numpy(adj_norm.data.astype(np.float32))
+    shape = torch.Size(adj_norm.shape)
     print("ساخت گراف سراسری تمام شد.")
     return torch.sparse_coo_tensor(indices, values, shape, device=device)
 
 class SessionDataset(Dataset):
-    def __init__(self, data): self.sequences, self.labels = data
-    def __len__(self): return len(self.sequences)
-    def __getitem__(self, index): return self.sequences[index], self.labels[index]
+    def __init__(self, data):
+        self.sequences, self.labels = data
+    def __len__(self):
+        return len(self.sequences)
+    def __getitem__(self, index):
+        return self.sequences[index], self.labels[index]
 
 def collate_fn(batch):
-    seqs, labs = zip(*batch); lengths = [len(s) for s in seqs]; max_len = max(lengths)
+    seqs, labs = zip(*batch)
+    lengths = [len(s) for s in seqs]
+    max_len = max(lengths)
     padded_seqs = torch.zeros(len(seqs), max_len).long()
-    for i, seq in enumerate(seqs): padded_seqs[i, :lengths[i]] = torch.LongTensor(seq)
+    for i, seq in enumerate(seqs):
+        padded_seqs[i, :lengths[i]] = torch.LongTensor(seq)
     adj_matrix = torch.zeros(len(seqs), max_len, max_len)
     for i, seq in enumerate(seqs):
-        for j in range(len(seq) - 1): adj_matrix[i, j, j + 1] = 1; adj_matrix[i, j + 1, j] = 1
+        for j in range(len(seq) - 1):
+            adj_matrix[i, j, j + 1] = 1
+            adj_matrix[i, j + 1, j] = 1
     return padded_seqs, torch.LongTensor(labs), torch.LongTensor(lengths), adj_matrix
 
 
@@ -149,7 +142,7 @@ class GCE_TAGNN_v2(nn.Module):
 # =====================================================================================
 def train_epoch(model, train_loader, optimizer, global_adj):
     model.train(); total_loss = 0.0
-    pbar = tqdm(train_loader, desc="Training Epoch")
+    pbar = tqdm(train_loader, desc=f"Training Epoch", dynamic_ncols=True)
     for seq, target, lengths, adj_matrix in pbar:
         seq, target, lengths, adj_matrix = seq.to(device), target.to(device), lengths.to(device), adj_matrix.to(device)
         optimizer.zero_grad()
@@ -164,11 +157,10 @@ def train_epoch(model, train_loader, optimizer, global_adj):
 def evaluate(model, test_loader, global_adj):
     model.eval(); all_preds, all_targets = [], []
     with torch.no_grad():
-        for seq, target, lengths, adj_matrix in tqdm(test_loader, desc="Evaluating"):
+        for seq, target, lengths, adj_matrix in tqdm(test_loader, desc="Evaluating", dynamic_ncols=True):
             seq, lengths, adj_matrix = seq.to(device), lengths.to(device), adj_matrix.to(device)
             scores = model(seq, lengths, adj_matrix, global_adj)
-            _, top_preds = torch.topk(scores, k=20, dim=1)
-            all_preds.append(top_preds.cpu()); all_targets.append(target.cpu())
+            _, top_preds = torch.topk(scores, k=20, dim=1); all_preds.append(top_preds.cpu()); all_targets.append(target.cpu())
     all_preds = torch.cat(all_preds); all_targets = torch.cat(all_targets).unsqueeze(1); correct_preds = (all_preds == (all_targets - 1))
     hr20 = correct_preds.any(dim=1).float().mean().item()
     ranks = (correct_preds.to(torch.float).argmax(dim=1) + 1); ranks[correct_preds.sum(dim=1) == 0] = 0
@@ -180,65 +172,83 @@ def evaluate(model, test_loader, global_adj):
 # بخش ۵: اجرای اصلی برنامه
 # =====================================================================================
 def main():
-    train_data, test_data, all_train_seq, num_items = load_and_preprocess_data(opt.dataset)
-    global_adj = build_global_graph(all_train_seq, num_items)
-    train_dataset = SessionDataset(train_data); test_dataset = SessionDataset(test_data)
-    train_loader = DataLoader(train_dataset, batch_size=opt.batch_size, shuffle=True, collate_fn=collate_fn)
-    test_loader = DataLoader(test_dataset, batch_size=opt.batch_size, shuffle=False, collate_fn=collate_fn)
-    model = GCE_TAGNN_v2(num_items=num_items, hidden_size=opt.hidden_size, gnn_step=opt.gnn_step, n_heads=opt.n_heads, dropout_rate=opt.dropout_rate).to(device)
-    optimizer = torch.optim.Adam(model.parameters(), lr=opt.lr, weight_decay=opt.l2)
-    scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=opt.lr_dc_step, gamma=opt.lr_dc)
-    
-    start_epoch = 0
-    best_mrr = 0
-    
-    # *** تغییر جدید: بارگذاری checkpoint در صورت وجود ***
-    if opt.resume_path:
-        if os.path.exists(opt.resume_path):
-            print(f"در حال بارگذاری checkpoint از مسیر: {opt.resume_path}")
-            checkpoint = torch.load(opt.resume_path, map_location=device)
-            model.load_state_dict(checkpoint['model_state_dict'])
-            optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
-            scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
-            start_epoch = checkpoint['epoch'] + 1
-            best_mrr = checkpoint.get('best_mrr', 0) # get best_mrr if it exists
-            print(f"مدل با موفقیت بارگذاری شد. آموزش از اپک {start_epoch} ادامه می‌یابد.")
-        else:
-            print(f"هشدار: مسیر checkpoint مشخص شده یافت نشد: {opt.resume_path}. آموزش از ابتدا شروع می‌شود.")
+    try:
+        # --- 1. بارگذاری داده‌های از قبل پردازش شده ---
+        print("مرحله ۱: در حال بارگذاری فایل‌های pickle...")
+        dataset_name = opt.dataset
+        data_folder = 'yoochoose1_64' if dataset_name == 'yoochoose' else dataset_name
+        train_path = os.path.join(data_folder, 'train.txt'); test_path = os.path.join(data_folder, 'test.txt'); all_seq_path = os.path.join(data_folder, 'all_train_seq.txt')
+        
+        if not all([os.path.exists(p) for p in [train_path, test_path, all_seq_path]]):
+            print(f"خطا: فایل‌های پیش‌پردازش شده در پوشه '{data_folder}' یافت نشد.")
+            print("لطفاً ابتدا اسکریپت preprocess.py را اجرا کنید.")
+            return
 
-    print("شروع آموزش مدل...")
-    patience_counter = 0
-    for epoch in range(start_epoch, opt.epoch):
-        start_time = time.time()
-        train_loss = train_epoch(model, train_loader, optimizer, global_adj)
-        hr20, mrr20 = evaluate(model, test_loader, global_adj)
-        
-        print(f"\n--- Epoch {epoch+1}/{opt.epoch} Summary ---")
-        print(f"Time: {time.time() - start_time:.2f}s | Train Loss: {train_loss:.4f} | HR@20: {hr20*100:.2f}% | MRR@20: {mrr20*100:.2f}%")
-        print("-" * (30 + len(str(epoch+1)) + len(str(opt.epoch))))
-        
-        if mrr20 > best_mrr:
-            best_mrr = mrr20
-            patience_counter = 0
-            checkpoint_path = f'checkpoint_{opt.dataset}.pt'
-            print(f"مدل بهتر با MRR@20: {best_mrr*100:.2f}% یافت شد! در حال ذخیره checkpoint در '{checkpoint_path}'...")
-            torch.save({
-                'epoch': epoch,
-                'model_state_dict': model.state_dict(),
-                'optimizer_state_dict': optimizer.state_dict(),
-                'scheduler_state_dict': scheduler.state_dict(),
-                'best_mrr': best_mrr,
-            }, checkpoint_path)
-        else:
-            patience_counter += 1
-            if patience_counter >= opt.patience:
-                print(f"عملکرد برای {opt.patience} اپک بهبود نیافت. توقف زودهنگام...")
-                break
-        
-        # scheduler.step() را بعد از اپتیمازر و در انتهای هر اپک فراخوانی کنید
-        scheduler.step()
+        train_data = pickle.load(open(train_path, 'rb')); test_data = pickle.load(open(test_path, 'rb')); all_train_seq = pickle.load(open(all_seq_path, 'rb'))
+        print("فایل‌ها با موفقیت بارگذاری شدند.")
 
-    print("آموزش تمام شد.")
+        # --- 2. محاسبه تعداد آیتم‌ها ---
+        print("مرحله ۲: در حال محاسبه تعداد آیتم‌ها...")
+        num_items = 0
+        for seq in all_train_seq:
+            if len(seq) > 0 and max(seq) > num_items: num_items = max(seq)
+        for seq in test_data[0]:
+            if len(seq) > 0 and max(seq) > num_items: num_items = max(seq)
+        num_items += 1
+        print(f"تعداد کل آیتم‌های منحصر به فرد: {num_items}")
+
+        # --- 3. ساخت گراف و دیتا لودرها ---
+        global_adj = build_global_graph(all_train_seq, num_items)
+        train_dataset = SessionDataset(train_data); test_dataset = SessionDataset(test_data)
+        train_loader = DataLoader(train_dataset, batch_size=opt.batch_size, shuffle=True, collate_fn=collate_fn)
+        test_loader = DataLoader(test_dataset, batch_size=opt.batch_size, shuffle=False, collate_fn=collate_fn)
+        print("مرحله ۳: ساخت گراف و لودرها با موفقیت انجام شد.")
+
+        # --- 4. مقداردهی اولیه مدل و بهینه‌ساز ---
+        model = GCE_TAGNN_v2(num_items=num_items, hidden_size=opt.hidden_size, gnn_step=opt.gnn_step, n_heads=opt.n_heads, dropout_rate=opt.dropout_rate).to(device)
+        optimizer = torch.optim.Adam(model.parameters(), lr=opt.lr, weight_decay=opt.l2)
+        scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=opt.lr_dc_step, gamma=0.1)
+        print("مرحله ۴: مدل و بهینه‌ساز با موفقیت ساخته شدند.")
+        
+        start_epoch = 0; best_mrr = 0
+        if opt.resume_path:
+            if os.path.exists(opt.resume_path):
+                print(f"در حال بارگذاری checkpoint از مسیر: {opt.resume_path}")
+                checkpoint = torch.load(opt.resume_path, map_location=device)
+                model.load_state_dict(checkpoint['model_state_dict']); optimizer.load_state_dict(checkpoint['optimizer_state_dict']); scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
+                start_epoch = checkpoint['epoch'] + 1; best_mrr = checkpoint.get('best_mrr', 0)
+                print(f"مدل با موفقیت بارگذاری شد. آموزش از اپک {start_epoch+1} ادامه می‌یابد.")
+            else:
+                print(f"هشدار: مسیر checkpoint یافت نشد: {opt.resume_path}. آموزش از ابتدا شروع می‌شود.")
+
+        # --- 5. چرخه آموزش ---
+        print("مرحله ۵: شروع چرخه آموزش...")
+        patience_counter = 0
+        for epoch in range(start_epoch, opt.epoch):
+            train_loss = train_epoch(model, train_loader, optimizer, global_adj)
+            hr20, mrr20 = evaluate(model, test_loader, global_adj)
+            print(f"\n--- Epoch {epoch+1}/{opt.epoch} Summary ---")
+            print(f"Train Loss: {train_loss:.4f} | HR@20: {hr20*100:.2f}% | MRR@20: {mrr20*100:.2f}%")
+            print("-" * 60)
+            
+            if mrr20 > best_mrr:
+                best_mrr = mrr20; patience_counter = 0; checkpoint_path = f'checkpoint_{opt.dataset}.pt'
+                print(f"مدل بهتر با MRR@20: {best_mrr*100:.2f}% یافت شد! در حال ذخیره checkpoint در '{checkpoint_path}'...")
+                torch.save({'epoch': epoch, 'model_state_dict': model.state_dict(), 'optimizer_state_dict': optimizer.state_dict(), 'scheduler_state_dict': scheduler.state_dict(), 'best_mrr': best_mrr}, checkpoint_path)
+            else:
+                patience_counter += 1
+                if patience_counter >= opt.patience: print(f"عملکرد برای {opt.patience} اپک بهبود نیافت. توقف زودهنگام..."); break
+            
+            scheduler.step()
+
+        print("آموزش تمام شد.")
+
+    except Exception as e:
+        print("\n !!! یک خطا در حین اجرای برنامه رخ داد !!!")
+        print("===================== متن کامل خطا =====================")
+        import traceback
+        traceback.print_exc()
+        print("======================================================")
 
 if __name__ == '__main__':
     main()
