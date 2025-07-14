@@ -1,7 +1,7 @@
 # 04_train_eval.py
 import torch, pickle, argparse, numpy as np
 from torch.utils.data import Dataset, DataLoader
-from 03_model import TAGNN_Base, TAGNN_GCE_PLUS
+from a03_model import TAGNN_Base, TAGNN_GCE_PLUS
 
 class SeqDataset(Dataset):
     def __init__(self, file_path):
