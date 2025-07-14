@@ -155,17 +155,32 @@ def train_epoch(model, train_loader, optimizer, global_adj):
     return total_loss / len(train_loader)
 
 def evaluate(model, test_loader, global_adj):
+    """تابع ارزیابی با محاسبه صحیح MRR."""
     model.eval(); all_preds, all_targets = [], []
     with torch.no_grad():
         for seq, target, lengths, adj_matrix in tqdm(test_loader, desc="Evaluating", dynamic_ncols=True):
             seq, lengths, adj_matrix = seq.to(device), lengths.to(device), adj_matrix.to(device)
             scores = model(seq, lengths, adj_matrix, global_adj)
-            _, top_preds = torch.topk(scores, k=20, dim=1); all_preds.append(top_preds.cpu()); all_targets.append(target.cpu())
-    all_preds = torch.cat(all_preds); all_targets = torch.cat(all_targets).unsqueeze(1); correct_preds = (all_preds == (all_targets - 1))
+            _, top_preds = torch.topk(scores, k=20, dim=1)
+            all_preds.append(top_preds.cpu()); all_targets.append(target.cpu())
+            
+    all_preds = torch.cat(all_preds); all_targets = torch.cat(all_targets).unsqueeze(1)
+    correct_preds = (all_preds == (all_targets - 1))
+    
+    # Hit Rate @ 20
     hr20 = correct_preds.any(dim=1).float().mean().item()
-    ranks = (correct_preds.to(torch.float).argmax(dim=1) + 1); ranks[correct_preds.sum(dim=1) == 0] = 0
-    mrr20 = (1.0 / ranks).sum().item() / len(all_targets)
+    
+    # محاسبه صحیح MRR@20
+    ranks = (correct_preds.to(torch.float).argmax(dim=1) + 1).to(torch.float)
+    reciprocal_ranks = 1.0 / ranks
+    # برای مواردی که هیچ پیش‌بینی صحیحی وجود ندارد، argmax مقدار 0 برمی‌گرداند و رتبه 1 می‌شود.
+    # این موارد را با استفاده از ماسک صفر می‌کنیم.
+    miss_mask = (correct_preds.sum(dim=1) == 0)
+    reciprocal_ranks[miss_mask] = 0
+    mrr20 = reciprocal_ranks.sum().item() / len(all_targets)
+    
     return hr20, mrr20
+
 
 
 # =====================================================================================
