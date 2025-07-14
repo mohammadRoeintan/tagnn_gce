@@ -4,7 +4,7 @@ from collections import defaultdict
 
 def build_global_graph(dataset='yoochoose1_64', topN=12, eps=3):
     root = f'datasets/{dataset}'
-    with open(f'{root}/train.txt') as f:
+    with open('/kaggle/input/yoochoose1-64/yoochoose1_64/train.txt') as f:
         train_seqs = [list(map(int, line.strip().split(','))) for line in f]
     freq = defaultdict(int)
     for seq in train_seqs:
